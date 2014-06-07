@@ -10,9 +10,10 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashMap.Strict (HashMap)
 import Control.Applicative
-import Data.Char (isSpace, chr)
+import Data.Char (isSpace, isDigit, chr)
 import Data.List (foldl')
 import Data.Text (Text, pack)
+import qualified Data.Text as Text
 import Control.Concurrent.STM
 import System.IO
 
@@ -20,8 +21,8 @@ import System.IO
 
 -- | A CRUD is a OO-style database Table, with getters and setters, a table of typed rows.
 data CRUD m row = CRUD
-     { createRow :: Text -> row -> m row
-     , getRow    :: Text        -> m row
+     { createRow :: row         -> m row
+     , getRow    :: Text        -> m (Maybe row)
      , getTable                 :: m (HashMap Text row)
      , updateRow :: Text -> row -> m ()
      , deleteRow :: Text        -> m () -- alway works
@@ -30,7 +31,7 @@ data CRUD m row = CRUD
 -- | take a STM-based CRUD, and return a IO-based CRUD
 atomicCRUD :: CRUD STM row -> CRUD IO row
 atomicCRUD crud = CRUD 
-     { createRow = \ iD row -> atomically $ createRow crud iD row
+     { createRow = \ row    -> atomically $ createRow crud row
      , getRow    = \ iD     -> atomically $ getRow crud iD
      , getTable  =             atomically $ getTable crud
      , updateRow = \ iD row -> atomically $ updateRow crud iD row
@@ -68,44 +69,55 @@ readCRUD h = do
         parseCRUD (Done bs r) env = do
                   case fromJSON r of
                     Error msg -> error msg
-                    Success (RowUpdate key row) -> 
-                            loadCRUD bs $! (HashMap.insert key row env)
-                    Success (RowDelete key) -> 
-                            loadCRUD bs $! (HashMap.delete key env)
+                    Success update -> loadCRUD bs $! tableUpdate update env
 
     -- load CRUD, please
     env <- loadCRUD BS.empty (HashMap.empty :: HashMap.HashMap Text row)
 
     print env
 
-    return $ error ""
+    -- This is our table,
+    table <- newTVarIO env
+    updateChan <- newTChanIO
+    
+    uniq <- newTVarIO (1 :: Integer)
+    -- Get the next, uniq id when creating a row in the table.
+    let next :: STM Text           
+        next = do
+               n <- readTVar uniq
+               let iD = Text.pack (show n) :: Text
+               t <- readTVar table
+               if HashMap.member iD t
+               then do let ks = maximum
+                                [ read (Text.unpack k)
+                                | k <- HashMap.keys t
+                                , Text.all isDigit k
+                                ]
+                       t <- writeTVar uniq (ks + 1)
+                       next
+                 -- Great, we can use this value
+               else do writeTVar uniq $! (n + 1)
+                       return iD
+
+    let updateCRUD update = do
+          modifyTVar table (tableUpdate update)
+          writeTChan updateChan update
+
+    return $ CRUD
+     { createRow = \ row    -> do iD <- next
+                                  updateCRUD (RowUpdate iD row)
+                                  t <- readTVar table
+                                  case HashMap.lookup iD t of
+                                    Nothing -> error "internal error in CRUD"
+                                    Just v -> return v
+     , getRow    = \ iD     -> do t <- readTVar table
+                                  return $ HashMap.lookup iD t
+     , getTable  =             do readTVar table
+     , updateRow = \ iD row -> do updateCRUD (RowUpdate iD row)
+     , deleteRow = \ iD     -> do updateCRUD (RowDelete iD)
+     }
+
 --    return (error "")
-
-
-{-
-        bs <- LBS.readFile "test.json"
-        let ws = parseCollection (LBS.toChunks bs)
-        let ws' = ws -- Prelude.take 100000000 (cycle ws)
-        print $ foldl' (flip writeCollection) HashMap.empty ws'
-        print ()
-
- -- This is written to be lazy, to minimize space usage.
- parseCollection :: [BS.ByteString] -> [RESTfulWRITE]
- parseCollection [] = []
- parseCollection (bs:bss) 
-         | BS.null bs = parseCollection bss
-         | otherwise  = p (Atto.parse P.json bs) bss
-   where p (Fail bs _ msg) bss 
-                 | all (BS.all (isSpace . chr . fromIntegral)) (bs:bss) = []
-                 | otherwise = fail $ "parse error: " ++ msg
-         p (Partial k) (bs:bss) 
-                 | BS.null bs = p (Partial k) bss
-                 | otherwise  = p (k bs) bss
-         p (Partial k) []  = p (k BS.empty) []        
-         p (Done bs r) bss = case fromJSON r of
-                               Error msg -> error msg
-                               Success v -> v : parseCollection (bs:bss)
--}        
 
 -- create a CRUD from a HashMap. If you want to extract the CRUD,
 -- use getTable (which gives the updated HashMap).
@@ -118,7 +130,7 @@ createCRUD = error ""
 -- | create a CRUD that does not honor write requests.
 readOnlyCRUD :: (Monad m) => CRUD m row -> CRUD m row
 readOnlyCRUD crud = CRUD 
-     { createRow = \ iD row -> fail ""
+     { createRow = \ iD  -> fail ""
      , getRow    = \ iD     -> getRow crud iD
      , getTable  =             getTable crud
      , updateRow = \ iD row -> fail ""
@@ -283,6 +295,12 @@ instance FromJSON row => FromJSON (TableUpdate row) where
         ( RowDelete <$>
                v .: "delete"
         )
+
+tableUpdate :: TableUpdate row -> HashMap Text row -> HashMap Text row
+tableUpdate (RowUpdate key row) = HashMap.insert key row
+tableUpdate (RowDelete key)     = HashMap.delete key
+
+----------------------------------------------------
 
 class (ToJSON row, FromJSON row) => CRUDRow row where
    toID :: row -> Text
