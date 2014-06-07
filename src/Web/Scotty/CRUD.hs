@@ -13,8 +13,10 @@ import Control.Applicative
 import Data.Char (isSpace, isDigit, chr)
 import Data.List (foldl')
 import Data.Text (Text, pack)
+import Control.Monad
 import qualified Data.Text as Text
 import Control.Concurrent.STM
+import Control.Concurrent
 import System.IO
 
 ------------------------------------------------------------------------------------
@@ -80,7 +82,18 @@ readCRUD h = do
     table <- newTVarIO env
     updateChan <- newTChanIO
     
-    uniq <- newTVarIO (1 :: Integer)
+    let top :: STM Integer
+        top = do t <- readTVar table
+                 return $ foldr max 0
+                          [ read (Text.unpack k)
+                          | k <- HashMap.keys t
+                          , Text.all isDigit k
+                          ]
+
+    uniq <- atomically $ do
+               mx <- top
+               newTVar (mx + 1)
+
     -- Get the next, uniq id when creating a row in the table.
     let next :: STM Text           
         next = do
@@ -88,12 +101,8 @@ readCRUD h = do
                let iD = Text.pack (show n) :: Text
                t <- readTVar table
                if HashMap.member iD t
-               then do let ks = maximum
-                                [ read (Text.unpack k)
-                                | k <- HashMap.keys t
-                                , Text.all isDigit k
-                                ]
-                       t <- writeTVar uniq (ks + 1)
+               then do mx <- top
+                       t <- writeTVar uniq (mx + 1)
                        next
                  -- Great, we can use this value
                else do writeTVar uniq $! (n + 1)
@@ -103,19 +112,34 @@ readCRUD h = do
           modifyTVar table (tableUpdate update)
           writeTChan updateChan update
 
+    forkIO $ forever $ do
+          tu <- atomically $ readTChan updateChan
+          print $ "writing" ++ show tu
+          LBS.hPutStr h (encode tu)
+          LBS.hPutStr h "\n" -- just for prettyness, nothing else
+          hFlush h
+          return ()
+
     return $ CRUD
      { createRow = \ row    -> do iD <- next
-                                  updateCRUD (RowUpdate iD row)
-                                  t <- readTVar table
-                                  case HashMap.lookup iD t of
-                                    Nothing -> error "internal error in CRUD"
-                                    Just v -> return v
+                                  row' <- lensID (const $ return iD) row
+                                  updateCRUD (RowUpdate iD row')
+                                  return row'
      , getRow    = \ iD     -> do t <- readTVar table
                                   return $ HashMap.lookup iD t
      , getTable  =             do readTVar table
      , updateRow = \ iD row -> do updateCRUD (RowUpdate iD row)
      , deleteRow = \ iD     -> do updateCRUD (RowDelete iD)
      }
+
+test = do
+        h <- openFile "test.json" ReadWriteMode 
+        crud :: CRUD STM Object <- readCRUD h
+        v <- atomically $ createRow crud $ HashMap.fromList [("XX",String "32345234")]
+        print v
+        return ()
+
+
 
 --    return (error "")
 
@@ -303,11 +327,11 @@ tableUpdate (RowDelete key)     = HashMap.delete key
 ----------------------------------------------------
 
 class (ToJSON row, FromJSON row) => CRUDRow row where
-   toID :: row -> Text
+   lensID :: (Functor f) => (Text -> f Text) -> row -> f row
 
 instance CRUDRow Object where
-   toID m = case HashMap.lookup "id" m of
-              Just (String v) -> v
-              Just _ -> error "CRUD Row with id this not a string"
-              Nothing -> error "CRUD Row without id"
-                      
+   lensID f m = (\ v' -> HashMap.insert "id" (String v') m) <$> f v
+       where v = case HashMap.lookup "id" m of
+                   Just (String v) ->  v
+                   _ -> "" -- by choice
+
