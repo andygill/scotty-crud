@@ -151,6 +151,27 @@ test = do
 createCRUD :: (FromJSON row, ToJSON row) => HashMap Text row -> IO (CRUD STM row)
 createCRUD = error ""
 
+datatypeCRUD :: forall m row . (Monad m, CRUDRow row) => CRUD m row -> CRUD m Object
+datatypeCRUD crud = CRUD
+     { createRow = return . toObject <=< createRow crud <=< fromObject
+     , getRow    = \ iD -> do optRow <- getRow crud iD
+                              case optRow of
+                                Nothing -> return Nothing
+                                Just row -> liftM Just $ return $ toObject row
+     , getTable = liftM (fmap toObject) $ getTable crud
+     , updateRow = \ iD -> updateRow crud iD <=< fromObject
+     , deleteRow = deleteRow crud
+     }
+ 
+ where toObject :: row -> Object
+       toObject r = case toJSON r of
+                  Object obj -> obj
+                  _ -> error "row is not representable as an Object"
+       fromObject :: Object -> m row
+       fromObject obj = case fromJSON (Object obj) of
+                       Success r -> return r
+                       Error err -> fail err
+
 -- | create a CRUD that does not honor write requests.
 readOnlyCRUD :: (Monad m) => CRUD m row -> CRUD m row
 readOnlyCRUD crud = CRUD 
@@ -326,8 +347,16 @@ tableUpdate (RowDelete key)     = HashMap.delete key
 
 ----------------------------------------------------
 
+-- It must be the case that toJSON never fails for any row (toJSON is total)
+-- and toJSON for a row must always returns an object.
+
 class (ToJSON row, FromJSON row) => CRUDRow row where
    lensID :: (Functor f) => (Text -> f Text) -> row -> f row
+
+-- (CRUDRow row) => toJSON row /= _|_
+-- (CRUDRow row) => toJSON row == Object {...}
+
+
 
 instance CRUDRow Object where
    lensID f m = (\ v' -> HashMap.insert "id" (String v') m) <$> f v
