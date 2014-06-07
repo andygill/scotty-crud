@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables, TypeFamilies, TypeSynonymInstances, FlexibleInstances #-}
 module Web.Scotty.CRUD where
 
 import Web.Scotty
@@ -12,18 +12,131 @@ import Data.HashMap.Strict (HashMap)
 import Control.Applicative
 import Data.Char (isSpace, chr)
 import Data.List (foldl')
+import Data.Text (Text, pack)
+import Control.Concurrent.STM
+import System.IO
 
+------------------------------------------------------------------------------------
+
+-- | A CRUD is a OO-style database Table, with getters and setters, a table of typed rows.
+data CRUD m row = CRUD
+     { createRow :: Text -> row -> m row
+     , getRow    :: Text        -> m row
+     , getTable                 :: m (HashMap Text row)
+     , updateRow :: Text -> row -> m ()
+     , deleteRow :: Text        -> m () -- alway works
+     }
+
+-- | take a STM-based CRUD, and return a IO-based CRUD
+atomicCRUD :: CRUD STM row -> CRUD IO row
+atomicCRUD crud = CRUD 
+     { createRow = \ iD row -> atomically $ createRow crud iD row
+     , getRow    = \ iD     -> atomically $ getRow crud iD
+     , getTable  =             atomically $ getTable crud
+     , updateRow = \ iD row -> atomically $ updateRow crud iD row
+     , deleteRow = \ iD     -> atomically $ deleteRow crud iD
+     }
+
+-- | We store our CRUD in a simple format; a list of newline seperated
+-- JSON objects, in the order they were applied, where later objects
+-- subsumes earlier ones. If the Handle provided is ReadWrite,
+-- the subsuquent updates are recorded after the initial ones.
+-- There is no attempt a compaction; we only append to the file.
+-- 
+-- Be careful: the default overloading of () for FromJSON
+-- will never work, because 
+
+readCRUD :: forall row . (Show row, CRUDRow row) => Handle -> IO (CRUD STM row)
+readCRUD h = do
+
+    let sz = 32 * 1024 :: Int
+
+    let loadCRUD bs env
+          | BS.null bs = do
+                  bs' <- BS.hGet h sz
+                  if BS.null bs'
+                  then return env        -- done, done, done (EOF)
+                  else loadCRUD bs' env
+          | otherwise =
+                  parseCRUD (Atto.parse P.json bs) env
+        parseCRUD (Fail bs _ msg) env
+                | BS.all (isSpace . chr . fromIntegral) bs = loadCRUD BS.empty env
+                | otherwise = fail $ "parse error: " ++ msg
+        parseCRUD (Partial k) env = do
+                  bs <- BS.hGet h sz    
+                  parseCRUD (k bs) env
+        parseCRUD (Done bs r) env = do
+                  case fromJSON r of
+                    Error msg -> error msg
+                    Success (RowUpdate key row) -> 
+                            loadCRUD bs $! (HashMap.insert key row env)
+                    Success (RowDelete key) -> 
+                            loadCRUD bs $! (HashMap.delete key env)
+
+    -- load CRUD, please
+    env <- loadCRUD BS.empty (HashMap.empty :: HashMap.HashMap Text row)
+
+    print env
+
+    return $ error ""
+--    return (error "")
+
+
+{-
+        bs <- LBS.readFile "test.json"
+        let ws = parseCollection (LBS.toChunks bs)
+        let ws' = ws -- Prelude.take 100000000 (cycle ws)
+        print $ foldl' (flip writeCollection) HashMap.empty ws'
+        print ()
+
+ -- This is written to be lazy, to minimize space usage.
+ parseCollection :: [BS.ByteString] -> [RESTfulWRITE]
+ parseCollection [] = []
+ parseCollection (bs:bss) 
+         | BS.null bs = parseCollection bss
+         | otherwise  = p (Atto.parse P.json bs) bss
+   where p (Fail bs _ msg) bss 
+                 | all (BS.all (isSpace . chr . fromIntegral)) (bs:bss) = []
+                 | otherwise = fail $ "parse error: " ++ msg
+         p (Partial k) (bs:bss) 
+                 | BS.null bs = p (Partial k) bss
+                 | otherwise  = p (k bs) bss
+         p (Partial k) []  = p (k BS.empty) []        
+         p (Done bs r) bss = case fromJSON r of
+                               Error msg -> error msg
+                               Success v -> v : parseCollection (bs:bss)
+-}        
+
+-- create a CRUD from a HashMap. If you want to extract the CRUD,
+-- use getTable (which gives the updated HashMap).
+
+--        (RESTfulWRITE -> IO ()) -> 
+
+createCRUD :: (FromJSON row, ToJSON row) => HashMap Text row -> IO (CRUD STM row)
+createCRUD = error ""
+
+-- | create a CRUD that does not honor write requests.
+readOnlyCRUD :: (Monad m) => CRUD m row -> CRUD m row
+readOnlyCRUD crud = CRUD 
+     { createRow = \ iD row -> fail ""
+     , getRow    = \ iD     -> getRow crud iD
+     , getTable  =             getTable crud
+     , updateRow = \ iD row -> fail ""
+     , deleteRow = \ iD     -> fail ""
+     }
+
+------------------------------------------------------------------------------------
 -- | crud takes a directory path, and a URL, and returns
 -- a scotty monad that provides a RESTful CRUD for this URL collection.
 
-crud :: FilePath -> String -> ScottyM ()
-crud dir url = do
-        
+scottyCRUD :: (FromJSON row, ToJSON row) => FilePath -> CRUD IO row -> ScottyM ()
+scottyCRUD dir url = do return ()
+{-        
         get (capture url) $ do 
                 return ()
         
         get (capture $ url ++ "/:id") $ do return ()
-                
+-}                
         
 
 main = do 
@@ -37,8 +150,10 @@ main = do
 
 -- This is written to be lazy, to minimize space usage.
 parseCollection :: [BS.ByteString] -> [RESTfulWRITE]
-parseCollection (bs:bss) | BS.null bs = parseCollection bss
-parseCollection (bs:bss) = p (Atto.parse P.json bs) bss
+parseCollection [] = []
+parseCollection (bs:bss) 
+        | BS.null bs = parseCollection bss
+        | otherwise  = p (Atto.parse P.json bs) bss
   where p (Fail bs _ msg) bss 
                 | all (BS.all (isSpace . chr . fromIntegral)) (bs:bss) = []
                 | otherwise = fail $ "parse error: " ++ msg
@@ -121,3 +236,60 @@ writeCollection :: RESTfulWRITE -> Collection -> Collection
 writeCollection (UpdateModel key val) = HashMap.insert key val
 writeCollection (DeleteModel key)     = HashMap.delete key
 
+----------------------------------------------------------------------
+
+-- Changes all all either an update (create a new field if needed) or a delete.
+
+data TableUpdate row
+        = RowUpdate Text row
+        | RowDelete Text
+        deriving (Show, Eq)
+        
+{-
+instance FromJSON RESTfulWRITE where
+    parseJSON (Object v) = 
+        (do Object obj <- case HashMap.lookup "update" v of
+                     Nothing -> fail "no update"
+                     Just v -> return v
+            flip UpdateModel obj <$> (obj .: "id")
+        ) <|> 
+        ( DeleteModel <$>
+               v .: "delete"
+        )
+-}
+        
+instance ToJSON row => ToJSON (TableUpdate row) where
+   -- Assumption: the obj contains an "id" key
+   toJSON (RowUpdate key obj) = 
+                   case toJSON obj of
+                     o@(Object env) -> 
+                       case HashMap.lookup "id" env of
+                         Just (String key')
+                            | key /= key' -> error "id: key does not match constructor"
+                            | otherwise   -> o
+                         Just _  -> error "id: is not a string"
+                         Nothing -> error "no id: key in row"
+                     _ -> error "row should be an object"
+   toJSON (RowDelete key)      = Object $ HashMap.fromList [("delete",String key)]
+
+instance FromJSON row => FromJSON (TableUpdate row) where
+    parseJSON (Object v) =
+        (do String iD <- case HashMap.lookup "id" v of
+                     Nothing -> fail "no id"
+                     Just v -> return v
+            row <- parseJSON (Object v)    
+            return $ RowUpdate iD row
+        ) <|> 
+        ( RowDelete <$>
+               v .: "delete"
+        )
+
+class (ToJSON row, FromJSON row) => CRUDRow row where
+   toID :: row -> Text
+
+instance CRUDRow Object where
+   toID m = case HashMap.lookup "id" m of
+              Just (String v) -> v
+              Just _ -> error "CRUD Row with id this not a string"
+              Nothing -> error "CRUD Row without id"
+                      
