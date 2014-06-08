@@ -2,4 +2,6 @@ dist/
 *~
 *.hi
 *.o
-github-wiki/
+scotty-crud.wiki/
+*#
+tmp/
