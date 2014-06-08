@@ -76,7 +76,7 @@ readCRUD h = do
     -- load CRUD, please
     env <- loadCRUD BS.empty (HashMap.empty :: HashMap.HashMap Text row)
 
-    print env
+--    print env
 
     -- This is our table,
     table <- newTVarIO env
@@ -114,7 +114,7 @@ readCRUD h = do
 
     forkIO $ forever $ do
           tu <- atomically $ readTChan updateChan
-          print $ "writing" ++ show tu
+--          print $ "writing" ++ show tu
           LBS.hPutStr h (encode tu)
           LBS.hPutStr h "\n" -- just for prettyness, nothing else
           hFlush h
@@ -195,41 +195,6 @@ scottyCRUD dir url = do return ()
         get (capture $ url ++ "/:id") $ do return ()
 -}                
         
-
-main = do 
-        bs <- LBS.readFile "test.json"
-        let ws = parseCollection (LBS.toChunks bs)
-        let ws' = ws -- Prelude.take 100000000 (cycle ws)
-        print $ foldl' (flip writeCollection) HashMap.empty ws'
-        print ()
-        
---(LBS.toChunks lbs)
-
--- This is written to be lazy, to minimize space usage.
-parseCollection :: [BS.ByteString] -> [RESTfulWRITE]
-parseCollection [] = []
-parseCollection (bs:bss) 
-        | BS.null bs = parseCollection bss
-        | otherwise  = p (Atto.parse P.json bs) bss
-  where p (Fail bs _ msg) bss 
-                | all (BS.all (isSpace . chr . fromIntegral)) (bs:bss) = []
-                | otherwise = fail $ "parse error: " ++ msg
-        p (Partial k) (bs:bss) 
-                | BS.null bs = p (Partial k) bss
-                | otherwise  = p (k bs) bss
-        p (Partial k) []  = p (k BS.empty) []        
-        p (Done bs r) bss = case fromJSON r of
-                              Error msg -> error msg
-                              Success v -> v : parseCollection (bs:bss)
-
-loop bs = do
-        print bs
-        loop2 (Atto.parse P.json bs)
-loop2 (Fail {}) = error "F"
-loop2 (Partial k) = loop2 (k (BS.empty))
-loop2 (Done t r) = do print (t,r)
-                      loop t
-
 
         
 
