@@ -117,7 +117,7 @@ interp (Bind m k) env = interpBind m k env
 interp (Return _) env = return True
 interp other      env = interpBind other Return env
 
-test_json = "test.json" :: String
+test_json = "tmp/test.json" :: String
 
 main = quickCheck prop_crud
 {-
