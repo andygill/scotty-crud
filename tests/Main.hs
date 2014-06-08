@@ -93,6 +93,7 @@ interpBind (GetId n) k env
                    , not (t `elem` (ids env))
                    ]
 interpBind (Restart) k env = do
+        sync (theCRUD env)       -- wait until it is all done
         -- Flush the buffer
         hFlush (handle env)
         hClose (handle env)
@@ -118,7 +119,8 @@ interp other      env = interpBind other Return env
 
 test_json = "test.json" :: String
 
-main = do
+main = quickCheck prop_crud
+{-
         -- First, clear the start
         b <- doesFileExist test_json
         if b
@@ -128,7 +130,7 @@ main = do
         crud <- readCRUD h
         r <- interp act $ Env (atomicCRUD crud) test_json h [] []
         print r
-
+-}
 
 runCRUDAction :: CRUDAction Object () -> IO Bool
 runCRUDAction prog = do
@@ -177,17 +179,17 @@ generateID = do
 
 generateTest :: Int -> Int -> Gen (CRUDAction Object ())
 generateTest n idCount = frequency 
-        [ (if n > 0 then 10 else 0
+        [ ( if n > 0 then 10 else 0
           , do row <- arbitraryHashMap False 5
                rest <- generateTest (n-1) (idCount + 1)
                return $ CreateRow row >>= \ () -> rest
           )
-        , (if n > 0 then 10 else 0
+        , ( if n > 0 then 10 else 0
           , do r <- choose (0,idCount)
                rest <- generateTest (n-1) idCount
                return $ GetId r >>= \ iD -> GetRow iD >>= \ () -> rest
           )
-        , (if n > 0 then 10 else 0
+        , ( if n > 0 then 5 else 0
           , do rest <- generateTest (n-1) idCount
                return $ Restart >>= \ () -> rest
           )

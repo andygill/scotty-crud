@@ -17,6 +17,7 @@ import Control.Monad
 import qualified Data.Text as Text
 import Control.Concurrent.STM
 import Control.Concurrent
+import Control.Exception
 import System.IO
 
 ------------------------------------------------------------------------------------
@@ -28,6 +29,7 @@ data CRUD m row = CRUD
      , getTable                 :: m (HashMap Text row)
      , updateRow :: Text -> row -> m ()
      , deleteRow :: Text        -> m () -- alway works
+     , sync                     :: m ()
      }
 
 -- | take a STM-based CRUD, and return a IO-based CRUD
@@ -38,6 +40,7 @@ atomicCRUD crud = CRUD
      , getTable  =             atomically $ getTable crud
      , updateRow = \ iD row -> atomically $ updateRow crud iD row
      , deleteRow = \ iD     -> atomically $ deleteRow crud iD
+     , sync      =             atomically $ sync crud
      }
 
 -- | We store our CRUD in a simple format; a list of newline seperated
@@ -112,13 +115,30 @@ readCRUD h = do
           modifyTVar table (tableUpdate update)
           writeTChan updateChan update
 
-    forkIO $ forever $ do
-          tu <- atomically $ readTChan updateChan
+    let handler m = m `catches`
+         []
+{-
+          [ {-Handler $ \ (ex :: SomeAsyncException) -> return ()
+          , -}Handler $ \ (ex :: SomeException) -> do { print ("X",ex) ; return (); } 
+                          -- print ("XX",ex) ; return () }
+          ]
+-}
+    flushed <- newTVarIO True
+    forkIO $ handler $ forever $ do
+          tu <- atomically $ do
+                  writeTVar flushed False
+                  readTChan updateChan
 --          print $ "writing" ++ show tu
           LBS.hPutStr h (encode tu)
           LBS.hPutStr h "\n" -- just for prettyness, nothing else
           hFlush h
+          atomically $ writeTVar flushed True
           return ()
+
+    let syncCRUD = do
+            flush_status <- readTVar flushed
+            chan_status <- isEmptyTChan updateChan
+            check (flush_status && chan_status)
 
     return $ CRUD
      { createRow = \ row    -> do iD <- next
@@ -130,6 +150,7 @@ readCRUD h = do
      , getTable  =             do readTVar table
      , updateRow = \ iD row -> do updateCRUD (RowUpdate iD row)
      , deleteRow = \ iD     -> do updateCRUD (RowDelete iD)
+     , sync = syncCRUD
      }
 
 test = do
@@ -161,6 +182,7 @@ datatypeCRUD crud = CRUD
      , getTable = liftM (fmap toObject) $ getTable crud
      , updateRow = \ iD -> updateRow crud iD <=< fromObject
      , deleteRow = deleteRow crud
+     , sync      = sync crud
      }
  
  where toObject :: row -> Object
@@ -180,6 +202,7 @@ readOnlyCRUD crud = CRUD
      , getTable  =             getTable crud
      , updateRow = \ iD row -> fail ""
      , deleteRow = \ iD     -> fail ""
+     , sync      = sync crud
      }
 
 ------------------------------------------------------------------------------------
