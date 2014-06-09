@@ -56,15 +56,15 @@ readTable h = do
     loadCRUD BS.empty HashMap.empty 
 
 
-writeRow :: CRUDRow row => Handle -> row -> IO ()
-writeRow h row = do
+writeTableUpdate :: CRUDRow row => Handle -> TableUpdate row -> IO ()
+writeTableUpdate h row = do
         LBS.hPutStr h (encode row)
         LBS.hPutStr h "\n" -- just for prettyness, nothing else
                      
 writeTable :: CRUDRow row => Handle -> Table row -> IO ()
 writeTable h table = sequence_
-        [ writeRow h row
-        | row <- HashMap.elems table
+        [ writeTableUpdate h $ RowUpdate iD row
+        | (iD,row) <- HashMap.toList table
         ]
 
 ------------------------------------------------------------------------------------
@@ -103,29 +103,7 @@ atomicCRUD crud = CRUD
 readCRUD :: forall row . (Show row, CRUDRow row) => Handle -> IO (CRUD STM row)
 readCRUD h = do
 
-    let sz = 32 * 1024 :: Int
-
-    let loadCRUD bs env
-          | BS.null bs = do
-                  bs' <- BS.hGet h sz
-                  if BS.null bs'
-                  then return env        -- done, done, done (EOF)
-                  else loadCRUD bs' env
-          | otherwise =
-                  parseCRUD (Atto.parse P.json bs) env
-        parseCRUD (Fail bs _ msg) env
-                | BS.all (isSpace . chr . fromIntegral) bs = loadCRUD BS.empty env
-                | otherwise = fail $ "parse error: " ++ msg
-        parseCRUD (Partial k) env = do
-                  bs <- BS.hGet h sz    
-                  parseCRUD (k bs) env
-        parseCRUD (Done bs r) env = do
-                  case fromJSON r of
-                    Error msg -> error msg
-                    Success update -> loadCRUD bs $! tableUpdate update env
-
-    -- load CRUD, please
-    env <- loadCRUD BS.empty (HashMap.empty :: HashMap.HashMap Text row)
+    env <- readTable h 
 
 --    print env
 
