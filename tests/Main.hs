@@ -27,6 +27,7 @@ data CRUDAction row a where
    -- CRUD
    CreateRow :: row -> CRUDAction row () 
    GetRow    :: Text -> CRUDAction row ()       -- auto-compared
+   UpdateRow :: row -> CRUDAction row ()
    -- Hack to get round the function QC function issue (TODO: revisit)
    -- Gets a stored ID. O => a new name, 1 => first, 2 => 2nd Create, etc.
    GetId     :: Int -> CRUDAction row Text

@@ -21,6 +21,54 @@ import Control.Exception
 import System.IO
 
 ------------------------------------------------------------------------------------
+-- Basic synonyms for key structures 
+--
+type Id        = Text
+type Table row = HashMap Id row
+type Row       = Object
+
+------------------------------------------------------------------------------------
+-- Table
+readTable :: CRUDRow row => Handle -> IO (Table row)
+readTable h = do
+
+    let sz = 32 * 1024 :: Int
+
+    let loadCRUD bs env
+          | BS.null bs = do
+                  bs' <- BS.hGet h sz
+                  if BS.null bs'
+                  then return env        -- done, done, done (EOF)
+                  else loadCRUD bs' env
+          | otherwise =
+                  parseCRUD (Atto.parse P.json bs) env
+        parseCRUD (Fail bs _ msg) env
+                | BS.all (isSpace . chr . fromIntegral) bs = loadCRUD BS.empty env
+                | otherwise = fail $ "parse error: " ++ msg
+        parseCRUD (Partial k) env = do
+                  bs <- BS.hGet h sz    
+                  parseCRUD (k bs) env
+        parseCRUD (Done bs r) env = do
+                  case fromJSON r of
+                    Error msg -> error msg
+                    Success update -> loadCRUD bs $! tableUpdate update env
+
+    loadCRUD BS.empty HashMap.empty 
+
+
+writeRow :: CRUDRow row => Handle -> row -> IO ()
+writeRow h row = do
+        LBS.hPutStr h (encode row)
+        LBS.hPutStr h "\n" -- just for prettyness, nothing else
+                     
+writeTable :: CRUDRow row => Handle -> Table row -> IO ()
+writeTable h table = sequence_
+        [ writeRow h row
+        | row <- HashMap.elems table
+        ]
+
+------------------------------------------------------------------------------------
+-- CRUD
 
 -- | A CRUD is a OO-style database Table, with getters and setters, a table of typed rows.
 data CRUD m row = CRUD
@@ -50,7 +98,7 @@ atomicCRUD crud = CRUD
 -- There is no attempt a compaction; we only append to the file.
 -- 
 -- Be careful: the default overloading of () for FromJSON
--- will never work, because 
+-- will never work, because ...
 
 readCRUD :: forall row . (Show row, CRUDRow row) => Handle -> IO (CRUD STM row)
 readCRUD h = do
@@ -217,70 +265,7 @@ scottyCRUD dir url = do return ()
         
         get (capture $ url ++ "/:id") $ do return ()
 -}                
-        
-
-        
-
---data Transaction = Transaction
---        { date :: Date
---        }
-
-data RESTfulRequest
-        = READ  RESTfulREAD
-        | WRITE RESTfulWRITE
-        deriving (Show, Eq)
-        
-data RESTfulREAD
-        = GetCollection 
-        | GetModel ID
-        deriving (Show, Eq)
-        
-
-data RESTfulWRITE
-        = UpdateModel ID Object  -- POST & PUT map to this
-        | DeleteModel ID
-        deriving (Show, Eq)
-
-
--- Check that the ID argument is the same as the one inside the Object.
-invarientRESTfulWRITE :: RESTfulWRITE -> Bool
-invarientRESTfulWRITE _ = True 
-
-data RESTfulResponse
-        = Okay
-        | Redirect ID
-        | ReturnModel Object
-        | NotFound              -- 404
-        deriving (Show, Eq)
-
-type ID = String
-        
-
-instance FromJSON RESTfulWRITE where
-    parseJSON (Object v) = 
-        (do Object obj <- case HashMap.lookup "update" v of
-                     Nothing -> fail "no update"
-                     Just v -> return v
-            flip UpdateModel obj <$> (obj .: "id")
-        ) <|> 
-        ( DeleteModel <$>
-               v .: "delete"
-        )
-instance ToJSON RESTfulWRITE where
-   toJSON (UpdateModel _id obj) = Object $ HashMap.fromList [("update:",Object obj)]
-
-----------------------------------------------------------------------
---
-----------------------------------------------------------------------
-
--- Like an Object, but the range *must* be an Object,
--- and this object must contain the { "id": key, ... }
-type Collection = HashMap ID Object
-
-writeCollection :: RESTfulWRITE -> Collection -> Collection
-writeCollection (UpdateModel key val) = HashMap.insert key val
-writeCollection (DeleteModel key)     = HashMap.delete key
-
+                
 ----------------------------------------------------------------------
 
 -- Changes all all either an update (create a new field if needed) or a delete.
