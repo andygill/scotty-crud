@@ -308,10 +308,24 @@ class (ToJSON row, FromJSON row) => CRUDRow row where
 -- (CRUDRow row) => toJSON row == Object {...}
 
 
-
 instance CRUDRow Object where
    lensID f m = (\ v' -> HashMap.insert "id" (String v') m) <$> f v
        where v = case HashMap.lookup "id" m of
                    Just (String v) ->  v
                    _ -> "" -- by choice
 
+----------------------------------------------------
+data NamedRow row = NamedRow Id row
+   deriving (Eq,Show)
+
+instance FromJSON row => FromJSON (NamedRow row) where
+    parseJSON (Object v) = NamedRow
+                <$> v .: "id"
+                <*> (parseJSON $ Object $ HashMap.delete "id" v)
+                
+instance ToJSON row => ToJSON (NamedRow row) where                
+   toJSON (NamedRow key row) = 
+                   case toJSON row of
+                     Object env -> Object $ HashMap.insert "id" (String key) env
+                     _ -> error "row should be an object"
+        
