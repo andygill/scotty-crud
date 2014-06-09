@@ -67,7 +67,7 @@ data Env row = Env
         , fileName :: FilePath
         , handle   :: Handle
         , ids      :: [Text]
-        , oracle   :: [(Text,row)]
+        , oracle   :: [(Text,Named row)]
         }
 
 interpBind :: (CRUDRow row, Show row, Eq row) => CRUDAction row a -> (a -> CRUDAction row b) ->  Env row -> IO Bool
@@ -79,9 +79,8 @@ interpBind (GetRow iD) k env = do
           _ -> return False
 interpBind (CreateRow row) k env = do
         putStrLn $ "CreateRow " ++ show row
-        row' <- createRow (theCRUD env) row
-        let iD' = row' ^.lensID
-        let env' = env { oracle = (iD',row') : [ (k,v) | (k,v) <- oracle env, k /= iD' ] 
+        Named iD' row' <- createRow (theCRUD env) row
+        let env' = env { oracle = (iD',Named iD' row') : [ (k,v) | (k,v) <- oracle env, k /= iD' ] 
                        , ids = ids env ++ [iD']
                        }
         interp (k ()) env'
@@ -93,6 +92,9 @@ interpBind (GetId n) k env
                    , let t = Text.pack (show n)
                    , not (t `elem` (ids env))
                    ]
+interpBind (UpdateRow row) k env = do undefined
+
+
 interpBind (Restart) k env = do
         sync (theCRUD env)       -- wait until it is all done
         -- Flush the buffer

@@ -63,7 +63,7 @@ writeTableUpdate h row = do
                      
 writeTable :: CRUDRow row => Handle -> Table row -> IO ()
 writeTable h table = sequence_
-        [ writeTableUpdate h $ RowUpdate iD row
+        [ writeTableUpdate h $ RowUpdate (Named iD row)
         | (iD,row) <- HashMap.toList table
         ]
 
@@ -72,23 +72,23 @@ writeTable h table = sequence_
 
 -- | A CRUD is a OO-style database Table, with getters and setters, a table of typed rows.
 data CRUD m row = CRUD
-     { createRow :: row         -> m row
-     , getRow    :: Text        -> m (Maybe row)
-     , getTable                 :: m (HashMap Text row)
-     , updateRow :: Text -> row -> m ()
-     , deleteRow :: Text        -> m () -- alway works
-     , sync                     :: m ()
+     { createRow :: row       -> m (Named row)
+     , getRow    :: Id        -> m (Maybe (Named row))
+     , getTable               :: m (Table row)
+     , updateRow :: Named row -> m ()
+     , deleteRow :: Id        -> m () -- alway works
+     , sync                   :: m ()
      }
 
 -- | take a STM-based CRUD, and return a IO-based CRUD
 atomicCRUD :: CRUD STM row -> CRUD IO row
 atomicCRUD crud = CRUD 
-     { createRow = \ row    -> atomically $ createRow crud row
-     , getRow    = \ iD     -> atomically $ getRow crud iD
-     , getTable  =             atomically $ getTable crud
-     , updateRow = \ iD row -> atomically $ updateRow crud iD row
-     , deleteRow = \ iD     -> atomically $ deleteRow crud iD
-     , sync      =             atomically $ sync crud
+     { createRow = atomically . createRow crud
+     , getRow    = atomically . getRow crud
+     , getTable  = atomically $ getTable crud
+     , updateRow = atomically . updateRow crud 
+     , deleteRow = atomically . deleteRow crud
+     , sync      = atomically $ sync crud
      }
 
 -- | We store our CRUD in a simple format; a list of newline seperated
@@ -168,14 +168,14 @@ readCRUD h = do
 
     return $ CRUD
      { createRow = \ row    -> do iD <- next
-                                  row' <- lensID (const $ return iD) row
-                                  updateCRUD (RowUpdate iD row')
+                                  let row' = Named iD row
+                                  updateCRUD (RowUpdate row')
                                   return row'
      , getRow    = \ iD     -> do t <- readTVar table
-                                  return $ HashMap.lookup iD t
+                                  return $ fmap (Named iD) $ HashMap.lookup iD t
      , getTable  =             do readTVar table
-     , updateRow = \ iD row -> do updateCRUD (RowUpdate iD row)
-     , deleteRow = \ iD     -> do updateCRUD (RowDelete iD)
+     , updateRow = updateCRUD . RowUpdate 
+     , deleteRow = updateCRUD . RowDelete
      , sync = syncCRUD
      }
 
@@ -195,11 +195,15 @@ test = do
 
 --        (RESTfulWRITE -> IO ()) -> 
 
+
+{-
+-- ToDo:
+
 createCRUD :: (FromJSON row, ToJSON row) => HashMap Text row -> IO (CRUD STM row)
 createCRUD = error ""
 
 datatypeCRUD :: forall m row . (Monad m, CRUDRow row) => CRUD m row -> CRUD m Object
-datatypeCRUD crud = CRUD
+datatypeCRUD crud = CRUD {}
      { createRow = return . toObject <=< createRow crud <=< fromObject
      , getRow    = \ iD -> do optRow <- getRow crud iD
                               case optRow of
@@ -211,7 +215,7 @@ datatypeCRUD crud = CRUD
      , sync      = sync crud
      }
  
- where toObject :: row -> Object
+ where toObject :: NamedRow row -> Object
        toObject r = case toJSON r of
                   Object obj -> obj
                   _ -> error "row is not representable as an Object"
@@ -219,7 +223,9 @@ datatypeCRUD crud = CRUD
        fromObject obj = case fromJSON (Object obj) of
                        Success r -> return r
                        Error err -> fail err
+-}
 
+{-
 -- | create a CRUD that does not honor write requests.
 readOnlyCRUD :: (Monad m) => CRUD m row -> CRUD m row
 readOnlyCRUD crud = CRUD 
@@ -230,7 +236,7 @@ readOnlyCRUD crud = CRUD
      , deleteRow = \ iD     -> fail ""
      , sync      = sync crud
      }
-
+-}
 ------------------------------------------------------------------------------------
 -- | crud takes a directory path, and a URL, and returns
 -- a scotty monad that provides a RESTful CRUD for this URL collection.
@@ -249,8 +255,8 @@ scottyCRUD dir url = do return ()
 -- Changes all all either an update (create a new field if needed) or a delete.
 
 data TableUpdate row
-        = RowUpdate Text row
-        | RowDelete Text
+        = RowUpdate (Named row)
+        | RowDelete Id
         deriving (Show, Eq)
         
 {-
@@ -268,33 +274,20 @@ instance FromJSON RESTfulWRITE where
         
 instance ToJSON row => ToJSON (TableUpdate row) where
    -- Assumption: the obj contains an "id" key
-   toJSON (RowUpdate key obj) = 
-                   case toJSON obj of
-                     o@(Object env) -> 
-                       case HashMap.lookup "id" env of
-                         Just (String key')
-                            | key /= key' -> error "id: key does not match constructor"
-                            | otherwise   -> o
-                         Just _  -> error "id: is not a string"
-                         Nothing -> error "no id: key in row"
-                     _ -> error "row should be an object"
+   toJSON (RowUpdate namedRow) = toJSON namedRow
    toJSON (RowDelete key)      = Object $ HashMap.fromList [("delete",String key)]
 
 instance FromJSON row => FromJSON (TableUpdate row) where
-    parseJSON (Object v) =
-        (do String iD <- case HashMap.lookup "id" v of
-                     Nothing -> fail "no id"
-                     Just v -> return v
-            row <- parseJSON (Object v)    
-            return $ RowUpdate iD row
+    parseJSON (Object v) = 
+        ( RowUpdate <$> parseJSON (Object v)
         ) <|> 
         ( RowDelete <$>
                v .: "delete"
         )
 
 tableUpdate :: TableUpdate row -> HashMap Text row -> HashMap Text row
-tableUpdate (RowUpdate key row) = HashMap.insert key row
-tableUpdate (RowDelete key)     = HashMap.delete key
+tableUpdate (RowUpdate (Named key row)) = HashMap.insert key row
+tableUpdate (RowDelete key)             = HashMap.delete key
 
 ----------------------------------------------------
 
@@ -315,16 +308,16 @@ instance CRUDRow Object where
                    _ -> "" -- by choice
 
 ----------------------------------------------------
-data NamedRow row = NamedRow Id row
+data Named row = Named Id row
    deriving (Eq,Show)
 
-instance FromJSON row => FromJSON (NamedRow row) where
-    parseJSON (Object v) = NamedRow
+instance FromJSON row => FromJSON (Named row) where
+    parseJSON (Object v) = Named
                 <$> v .: "id"
                 <*> (parseJSON $ Object $ HashMap.delete "id" v)
                 
-instance ToJSON row => ToJSON (NamedRow row) where                
-   toJSON (NamedRow key row) = 
+instance ToJSON row => ToJSON (Named row) where                
+   toJSON (Named key row) = 
                    case toJSON row of
                      Object env -> Object $ HashMap.insert "id" (String key) env
                      _ -> error "row should be an object"
